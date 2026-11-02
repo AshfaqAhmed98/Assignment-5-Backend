@@ -20,5 +20,9 @@ it starts listening and exits with an error if it cannot connect. The
 `/health` endpoint pings MongoDB and returns HTTP 503 if the database is
 unavailable.
 
+Unmatched routes and invalid JSON request bodies return consistent JSON error
+responses through centralized Express middleware. Unexpected server errors are
+logged by the backend and returned to clients without exposing internal details.
+
 The current backend only establishes the database connection and exposes
 health-check routes; application data endpoints have not been added yet.

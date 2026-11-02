@@ -1,5 +1,9 @@
 const express = require("express");
 const { connectToDatabase } = require("./lib/mongodb");
+const {
+  errorHandler,
+  notFoundHandler,
+} = require("./middleware/error-handler");
 
 const app = express();
 const port = Number(process.env.PORT || 3001);
@@ -19,10 +23,13 @@ app.get("/health", async (_req, res) => {
     await app.locals.database.command({ ping: 1 });
     res.json({ status: "ok", database: "connected" });
   } catch (error) {
-    console.error("MongoDB health check failed:", error);
-    res.status(503).json({ status: "error", database: "disconnected" });
+    error.statusCode = 503;
+    throw error;
   }
 });
+
+app.use(notFoundHandler);
+app.use(errorHandler);
 
 async function startServer() {
   const { client, database } = await connectToDatabase();
