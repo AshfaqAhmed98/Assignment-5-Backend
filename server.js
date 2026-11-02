@@ -1,5 +1,7 @@
 const express = require("express");
 const { connectToDatabase } = require("./lib/mongodb");
+const { getJwtSecret } = require("./lib/jwt");
+const { createAuthRouter } = require("./routes/auth");
 const {
   errorHandler,
   notFoundHandler,
@@ -28,12 +30,22 @@ app.get("/health", async (_req, res) => {
   }
 });
 
+app.use("/api/auth", createAuthRouter());
 app.use(notFoundHandler);
 app.use(errorHandler);
 
 async function startServer() {
+  getJwtSecret();
   const { client, database } = await connectToDatabase();
   app.locals.database = database;
+  try {
+    await database
+      .collection("users")
+      .createIndex({ email: 1 }, { unique: true, name: "users_email_unique" });
+  } catch (error) {
+    await client.close();
+    throw error;
+  }
 
   const server = app.listen(port, () => {
     console.log(`Express server listening on port ${port}`);

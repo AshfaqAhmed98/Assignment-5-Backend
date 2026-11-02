@@ -24,5 +24,25 @@ Unmatched routes and invalid JSON request bodies return consistent JSON error
 responses through centralized Express middleware. Unexpected server errors are
 logged by the backend and returned to clients without exposing internal details.
 
-The current backend only establishes the database connection and exposes
-health-check routes; application data endpoints have not been added yet.
+The backend currently provides MongoDB connectivity, health checks, and
+email/password authentication. Event CRUD endpoints have not been added yet.
+
+## JWT authentication
+
+Set `JWT_SECRET` in `.env.local` to a private random secret of at least 32
+bytes. The backend requires it before starting and never returns it to clients.
+Registration and login return a one-hour access JWT. Send it on protected
+requests in the `Authorization` header using the `Bearer <token>` scheme.
+`GET /api/auth/me` verifies the token and returns the current user. Refresh
+tokens and logout/revocation are not implemented.
+
+### Authentication endpoints
+
+- `POST /api/auth/register` — JSON body: `{ "name", "email", "password" }`.
+  Passwords must be 8–128 characters. The password is hashed before it is
+  stored in MongoDB.
+- `POST /api/auth/login` — JSON body: `{ "email", "password" }`.
+- `GET /api/auth/me` — requires a valid bearer token.
+
+Emails are normalized to lowercase and uniquely indexed. Tokens use HS256 and
+are checked for signature, issuer, audience, and expiration.

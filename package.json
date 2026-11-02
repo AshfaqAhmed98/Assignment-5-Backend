@@ -8,7 +8,9 @@
     "dev": "node --env-file=.env.local --watch server.js"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "express": "^5.3.0",
+    "jsonwebtoken": "^9.0.3",
     "mongodb": "^7.8.0"
   }
 }
