@@ -1,4 +1,5 @@
 const express = require("express");
+const helmet = require("helmet");
 const { connectToDatabase } = require("./lib/mongodb");
 const { getJwtSecret } = require("./lib/jwt");
 const { createAuthRouter } = require("./routes/auth");
@@ -15,7 +16,19 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PORT must be an integer between 1 and 65535.");
 }
 
-app.use(express.json());
+app.use(
+  helmet({
+    hsts:
+      process.env.NODE_ENV === "production"
+        ? { maxAge: 31_536_000, includeSubDomains: true }
+        : false,
+  }),
+);
+app.use("/api", (_req, res, next) => {
+  res.setHeader("Cache-Control", "no-store");
+  next();
+});
+app.use(express.json({ limit: "32kb" }));
 
 app.get("/", (_req, res) => {
   res.json({ message: "Backend server is running" });
@@ -45,6 +58,10 @@ async function startServer() {
       database
         .collection("users")
         .createIndex({ email: 1 }, { unique: true, name: "users_email_unique" }),
+      database.collection("users").createIndex(
+        { googleId: 1 },
+        { unique: true, sparse: true, name: "users_google_id_unique" },
+      ),
       database.collection("events").createIndex(
         { eventDate: 1, _id: 1 },
         { name: "events_upcoming_by_date" },

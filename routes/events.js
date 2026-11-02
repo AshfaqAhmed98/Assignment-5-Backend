@@ -10,6 +10,17 @@ const eventTypes = new Set([
   "Workshop",
   "Other",
 ]);
+const eventFields = new Set([
+  "title",
+  "description",
+  "type",
+  "thumbnailUrl",
+  "location",
+  "eventDate",
+]);
+const eventListQueryFields = new Set(["page", "limit", "sort", "order"]);
+const joinedEventsQueryFields = new Set(["page", "limit"]);
+const managedEventsQueryFields = new Set(["page", "limit"]);
 const maximumPageSize = 100;
 const maximumSkip = 100_000;
 const isoDatePattern =
@@ -34,7 +45,7 @@ function readPositiveInteger(value, defaultValue, maximum, fieldName) {
     return defaultValue;
   }
 
-  if (!/^\d+$/.test(value)) {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) {
     throw createHttpError(`${fieldName} must be a positive integer.`, 400);
   }
 
@@ -53,6 +64,18 @@ function readPositiveInteger(value, defaultValue, maximum, fieldName) {
   return parsedValue;
 }
 
+function validateQueryParameters(query, allowedFields) {
+  const unexpectedField = Object.keys(query).find(
+    (field) => !allowedFields.has(field),
+  );
+  if (unexpectedField) {
+    throw createHttpError(
+      "Request contains an unsupported query parameter.",
+      400,
+    );
+  }
+}
+
 function toPublicEvent(event) {
   return {
     id: event._id.toString(),
@@ -68,6 +91,13 @@ function toPublicEvent(event) {
 function validateCreateEvent(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw createHttpError("A JSON object is required.", 400);
+  }
+
+  const unexpectedField = Object.keys(body).find(
+    (field) => !eventFields.has(field),
+  );
+  if (unexpectedField) {
+    throw createHttpError("Request contains an unsupported field.", 400);
   }
 
   const title = typeof body.title === "string" ? body.title.trim() : "";
@@ -183,6 +213,7 @@ function createEventsRouter() {
   const router = express.Router();
 
   router.get("/", async (req, res) => {
+    validateQueryParameters(req.query, eventListQueryFields);
     const page = readPositiveInteger(req.query.page, 1, 100_000, "page");
     const limit = readPositiveInteger(
       req.query.limit,
@@ -236,6 +267,7 @@ function createEventsRouter() {
   });
 
   router.get("/joined", authenticate, async (req, res) => {
+    validateQueryParameters(req.query, joinedEventsQueryFields);
     const userId = getAuthenticatedUserId(req);
     const page = readPositiveInteger(req.query.page, 1, 100_000, "page");
     const limit = readPositiveInteger(
@@ -267,6 +299,48 @@ function createEventsRouter() {
 
     res.json({
       events: documents.map((join) => join.event),
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  });
+
+  router.get("/mine", authenticate, async (req, res) => {
+    validateQueryParameters(req.query, managedEventsQueryFields);
+    const userId = getAuthenticatedUserId(req);
+    const page = readPositiveInteger(req.query.page, 1, 100_000, "page");
+    const limit = readPositiveInteger(
+      req.query.limit,
+      20,
+      maximumPageSize,
+      "limit",
+    );
+    const skip = (page - 1) * limit;
+
+    if (!Number.isSafeInteger(skip) || skip > maximumSkip) {
+      throw createHttpError(
+        `Requested page is too large; maximum skip is ${maximumSkip}.`,
+        400,
+      );
+    }
+
+    const events = req.app.locals.database.collection("events");
+    const filter = { createdBy: userId };
+    const [documents, total] = await Promise.all([
+      events
+        .find(filter)
+        .sort({ createdAt: -1, _id: -1 })
+        .skip(skip)
+        .limit(limit)
+        .toArray(),
+      events.countDocuments(filter),
+    ]);
+
+    res.json({
+      events: documents.map(toPublicEvent),
       pagination: {
         page,
         limit,

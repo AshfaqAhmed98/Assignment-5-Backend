@@ -43,10 +43,18 @@ tokens and logout/revocation are not implemented.
   Passwords must be 8–128 characters. The password is hashed before it is
   stored in MongoDB.
 - `POST /api/auth/login` — JSON body: `{ "email", "password" }`.
+- `POST /api/auth/google` — JSON body: `{ "credential" }` containing the
+  Google Identity Services ID token. The backend verifies the token audience,
+  signature, expiry, and verified email using `GOOGLE_CLIENT_ID`; it creates
+  an account on first sign-in. Existing email/password accounts must continue
+  to use email/password sign-in; implicit account linking is not performed.
 - `GET /api/auth/me` — requires a valid bearer token.
 
 Emails are normalized to lowercase and uniquely indexed. Tokens use HS256 and
 are checked for signature, issuer, audience, and expiration.
+Registration and login accept only their documented fields; passwords are
+limited to 128 characters.
+Google accounts are uniquely indexed by Google subject ID.
 
 ## Event endpoints
 
@@ -59,6 +67,9 @@ are checked for signature, issuer, audience, and expiration.
   maximum `100`), `sort` (`eventDate` or `createdAt`), and `order` (`asc` or
   `desc`). The response includes pagination totals.
 - `GET /api/events/:id` — public event details by MongoDB ObjectId.
+- `GET /api/events/mine` — requires a bearer token. Lists events created by
+  the current user, newest first. Supports `page` (default `1`) and `limit`
+  (default `20`, maximum `100`); the response includes pagination totals.
 - `POST /api/events/:id/join` — requires a bearer token. Registers the current
   user for an upcoming event and returns the event snapshot. Joining the same
   event more than once returns `409`.
@@ -79,3 +90,23 @@ Creation currently accepts an HTTP or HTTPS thumbnail URL; file uploads are
 not implemented. Updates use the same validation, including a future
 ISO 8601 event date and HTTP/HTTPS thumbnail URL. MongoDB indexes support
 upcoming-event and creation-date sorting.
+
+## API request security
+
+JSON request bodies are limited to 32 KB. Event create/update and auth
+endpoints validate the request object, accept only documented fields, and
+reject invalid types, lengths, dates, URLs, and pagination values. Event query
+filters and sort fields are constructed server-side rather than taken directly
+from request objects. Helmet adds standard HTTP security headers, API responses
+are marked `Cache-Control: no-store`, and HSTS is enabled only when
+`NODE_ENV=production`. Join registrations are protected by authentication and
+a unique MongoDB index on user/event IDs, so concurrent duplicate requests
+cannot create duplicate registrations.
+
+To enable Google sign-in, set `GOOGLE_CLIENT_ID` in `Backend/.env.local` and
+`NEXT_PUBLIC_GOOGLE_CLIENT_ID` in `Frontend/.env.local` to the same Google
+OAuth web client ID. Add the frontend origin (for local development,
+`http://localhost:3000`) to the OAuth client's authorized JavaScript origins.
+The backend verifies Google ID tokens and does not need the OAuth client
+secret for this flow. Never put `GOOGLE_CLIENT_SECRET` in a `NEXT_PUBLIC_`
+variable.
