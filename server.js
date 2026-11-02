@@ -2,6 +2,7 @@ const express = require("express");
 const { connectToDatabase } = require("./lib/mongodb");
 const { getJwtSecret } = require("./lib/jwt");
 const { createAuthRouter } = require("./routes/auth");
+const { createEventsRouter } = require("./routes/events");
 const {
   errorHandler,
   notFoundHandler,
@@ -31,6 +32,7 @@ app.get("/health", async (_req, res) => {
 });
 
 app.use("/api/auth", createAuthRouter());
+app.use("/api/events", createEventsRouter());
 app.use(notFoundHandler);
 app.use(errorHandler);
 
@@ -39,9 +41,19 @@ async function startServer() {
   const { client, database } = await connectToDatabase();
   app.locals.database = database;
   try {
-    await database
-      .collection("users")
-      .createIndex({ email: 1 }, { unique: true, name: "users_email_unique" });
+    await Promise.all([
+      database
+        .collection("users")
+        .createIndex({ email: 1 }, { unique: true, name: "users_email_unique" }),
+      database.collection("events").createIndex(
+        { eventDate: 1, _id: 1 },
+        { name: "events_upcoming_by_date" },
+      ),
+      database.collection("events").createIndex(
+        { createdAt: -1, _id: -1 },
+        { name: "events_by_created_at" },
+      ),
+    ]);
   } catch (error) {
     await client.close();
     throw error;

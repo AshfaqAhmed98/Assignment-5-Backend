@@ -24,8 +24,8 @@ Unmatched routes and invalid JSON request bodies return consistent JSON error
 responses through centralized Express middleware. Unexpected server errors are
 logged by the backend and returned to clients without exposing internal details.
 
-The backend currently provides MongoDB connectivity, health checks, and
-email/password authentication. Event CRUD endpoints have not been added yet.
+The backend currently provides MongoDB connectivity, health checks,
+email/password authentication, and event creation/list/detail endpoints.
 
 ## JWT authentication
 
@@ -46,3 +46,19 @@ tokens and logout/revocation are not implemented.
 
 Emails are normalized to lowercase and uniquely indexed. Tokens use HS256 and
 are checked for signature, issuer, audience, and expiration.
+
+## Event endpoints
+
+- `POST /api/events` — requires a bearer token. JSON body: `{ "title",
+  "description", "type", "thumbnailUrl", "location", "eventDate" }`.
+  `eventDate` must be a future ISO 8601 timestamp with a timezone. The event is
+  saved with its creator's user ID.
+- `GET /api/events` — public list of upcoming events sorted by event date
+  ascending by default. Supports `page` (default `1`), `limit` (default `20`,
+  maximum `100`), `sort` (`eventDate` or `createdAt`), and `order` (`asc` or
+  `desc`). The response includes pagination totals.
+- `GET /api/events/:id` — public event details by MongoDB ObjectId.
+
+Creation currently accepts an HTTP or HTTPS thumbnail URL; file uploads are
+not implemented. MongoDB indexes support upcoming-event and creation-date
+sorting.
