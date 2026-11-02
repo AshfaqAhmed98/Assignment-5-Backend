@@ -21,6 +21,14 @@ function createHttpError(message, statusCode) {
   return error;
 }
 
+function getAuthenticatedUserId(req) {
+  if (!ObjectId.isValid(req.auth.userId)) {
+    throw createHttpError("Invalid or expired access token.", 401);
+  }
+
+  return new ObjectId(req.auth.userId);
+}
+
 function readPositiveInteger(value, defaultValue, maximum, fieldName) {
   if (value === undefined) {
     return defaultValue;
@@ -244,14 +252,10 @@ function createEventsRouter() {
   });
 
   router.post("/", authenticate, async (req, res) => {
-    if (!ObjectId.isValid(req.auth.userId)) {
-      throw createHttpError("Invalid or expired access token.", 401);
-    }
-
     const event = validateCreateEvent(req.body);
     const document = {
       ...event,
-      createdBy: new ObjectId(req.auth.userId),
+      createdBy: getAuthenticatedUserId(req),
       createdAt: new Date(),
     };
     const result = await req.app.locals.database
@@ -261,6 +265,51 @@ function createEventsRouter() {
     res.status(201).json({
       event: toPublicEvent({ ...document, _id: result.insertedId }),
     });
+  });
+
+  router.put("/:id", authenticate, async (req, res) => {
+    if (!ObjectId.isValid(req.params.id)) {
+      throw createHttpError("Event was not found.", 404);
+    }
+
+    const eventId = new ObjectId(req.params.id);
+    const createdBy = getAuthenticatedUserId(req);
+    const event = validateCreateEvent(req.body);
+    const events = req.app.locals.database.collection("events");
+    const result = await events.updateOne(
+      { _id: eventId, createdBy },
+      { $set: event },
+    );
+
+    if (result.matchedCount === 0) {
+      throw createHttpError("Event was not found.", 404);
+    }
+
+    const updatedEvent = await events.findOne({ _id: eventId, createdBy });
+    if (!updatedEvent) {
+      throw createHttpError("Event was not found.", 404);
+    }
+
+    res.json({ event: toPublicEvent(updatedEvent) });
+  });
+
+  router.delete("/:id", authenticate, async (req, res) => {
+    if (!ObjectId.isValid(req.params.id)) {
+      throw createHttpError("Event was not found.", 404);
+    }
+
+    const result = await req.app.locals.database
+      .collection("events")
+      .deleteOne({
+        _id: new ObjectId(req.params.id),
+        createdBy: getAuthenticatedUserId(req),
+      });
+
+    if (result.deletedCount === 0) {
+      throw createHttpError("Event was not found.", 404);
+    }
+
+    res.status(204).end();
   });
 
   return router;

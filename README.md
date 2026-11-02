@@ -58,7 +58,15 @@ are checked for signature, issuer, audience, and expiration.
   maximum `100`), `sort` (`eventDate` or `createdAt`), and `order` (`asc` or
   `desc`). The response includes pagination totals.
 - `GET /api/events/:id` — public event details by MongoDB ObjectId.
+- `PUT /api/events/:id` — requires a bearer token and the event creator's
+  ownership. Replaces the event fields using the same JSON body and validation
+  as event creation; responds with the updated event. Nonexistent events and
+  events owned by another user both return `404`.
+- `DELETE /api/events/:id` — requires a bearer token and the event creator's
+  ownership. Returns `204` on success; nonexistent events and events owned by
+  another user both return `404`.
 
 Creation currently accepts an HTTP or HTTPS thumbnail URL; file uploads are
-not implemented. MongoDB indexes support upcoming-event and creation-date
-sorting.
+not implemented. Updates use the same validation, including a future
+ISO 8601 event date and HTTP/HTTPS thumbnail URL. MongoDB indexes support
+upcoming-event and creation-date sorting.
