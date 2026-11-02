@@ -235,6 +235,47 @@ function createEventsRouter() {
     });
   });
 
+  router.get("/joined", authenticate, async (req, res) => {
+    const userId = getAuthenticatedUserId(req);
+    const page = readPositiveInteger(req.query.page, 1, 100_000, "page");
+    const limit = readPositiveInteger(
+      req.query.limit,
+      20,
+      maximumPageSize,
+      "limit",
+    );
+    const skip = (page - 1) * limit;
+
+    if (!Number.isSafeInteger(skip) || skip > maximumSkip) {
+      throw createHttpError(
+        `Requested page is too large; maximum skip is ${maximumSkip}.`,
+        400,
+      );
+    }
+
+    const joins = req.app.locals.database.collection("eventJoins");
+    const filter = { userId };
+    const [documents, total] = await Promise.all([
+      joins
+        .find(filter)
+        .sort({ joinedAt: -1, _id: -1 })
+        .skip(skip)
+        .limit(limit)
+        .toArray(),
+      joins.countDocuments(filter),
+    ]);
+
+    res.json({
+      events: documents.map((join) => join.event),
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  });
+
   router.get("/:id", async (req, res) => {
     if (!ObjectId.isValid(req.params.id)) {
       throw createHttpError("Event was not found.", 404);
@@ -265,6 +306,55 @@ function createEventsRouter() {
     res.status(201).json({
       event: toPublicEvent({ ...document, _id: result.insertedId }),
     });
+  });
+
+  router.post("/:id/join", authenticate, async (req, res) => {
+    if (!ObjectId.isValid(req.params.id)) {
+      throw createHttpError("Event was not found.", 404);
+    }
+
+    const database = req.app.locals.database;
+    const event = await database.collection("events").findOne({
+      _id: new ObjectId(req.params.id),
+    });
+
+    if (!event) {
+      throw createHttpError("Event was not found.", 404);
+    }
+
+    if (event.eventDate.getTime() <= Date.now()) {
+      throw createHttpError("This event has already taken place.", 400);
+    }
+
+    const userId = getAuthenticatedUserId(req);
+    const user = await database.collection("users").findOne(
+      { _id: userId },
+      { projection: { _id: 1 } },
+    );
+
+    if (!user) {
+      throw createHttpError("Invalid or expired access token.", 401);
+    }
+
+    const joinedAt = new Date();
+    const publicEvent = toPublicEvent(event);
+
+    try {
+      await database.collection("eventJoins").insertOne({
+        eventId: event._id,
+        userId,
+        joinedAt,
+        event: publicEvent,
+      });
+    } catch (error) {
+      if (error.code === 11000) {
+        throw createHttpError("You have already joined this event.", 409);
+      }
+
+      throw error;
+    }
+
+    res.status(201).json({ event: publicEvent, joinedAt: joinedAt.toISOString() });
   });
 
   router.put("/:id", authenticate, async (req, res) => {

@@ -25,7 +25,8 @@ responses through centralized Express middleware. Unexpected server errors are
 logged by the backend and returned to clients without exposing internal details.
 
 The backend currently provides MongoDB connectivity, health checks,
-email/password authentication, and event creation/list/detail endpoints.
+email/password authentication, and event creation, listing, joining, and
+management endpoints.
 
 ## JWT authentication
 
@@ -58,6 +59,14 @@ are checked for signature, issuer, audience, and expiration.
   maximum `100`), `sort` (`eventDate` or `createdAt`), and `order` (`asc` or
   `desc`). The response includes pagination totals.
 - `GET /api/events/:id` — public event details by MongoDB ObjectId.
+- `POST /api/events/:id/join` — requires a bearer token. Registers the current
+  user for an upcoming event and returns the event snapshot. Joining the same
+  event more than once returns `409`.
+- `GET /api/events/joined` — requires a bearer token. Returns the current
+  user's joined event snapshots, newest registrations first. Supports `page`
+  (default `1`) and `limit` (default `20`, maximum `100`); the response includes
+  pagination totals. Joined events remain visible as snapshots if the original
+  event is later updated or deleted.
 - `PUT /api/events/:id` — requires a bearer token and the event creator's
   ownership. Replaces the event fields using the same JSON body and validation
   as event creation; responds with the updated event. Nonexistent events and

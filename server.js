@@ -53,6 +53,14 @@ async function startServer() {
         { createdAt: -1, _id: -1 },
         { name: "events_by_created_at" },
       ),
+      database.collection("eventJoins").createIndex(
+        { userId: 1, eventId: 1 },
+        { unique: true, name: "event_joins_user_event_unique" },
+      ),
+      database.collection("eventJoins").createIndex(
+        { userId: 1, joinedAt: -1, _id: -1 },
+        { name: "event_joins_by_user_and_date" },
+      ),
     ]);
   } catch (error) {
     await client.close();
