@@ -9,4 +9,16 @@ npm install
 npm run dev
 ```
 
-The server listens on port `3001` by default. Set the `PORT` environment variable to use a different port. Check `http://localhost:3001/health` for the health status.
+The server listens on port `3001` by default. Set the `PORT` environment
+variable to use a different port.
+
+Backend environment variables belong in `.env.local` in this directory. The
+start and development scripts load that file automatically. Keep it private
+and do not commit it. Set `MONGODB_URI` to your MongoDB connection string and
+`MONGODB_DATABASE` to the database name. The server connects to MongoDB before
+it starts listening and exits with an error if it cannot connect. The
+`/health` endpoint pings MongoDB and returns HTTP 503 if the database is
+unavailable.
+
+The current backend only establishes the database connection and exposes
+health-check routes; application data endpoints have not been added yet.
