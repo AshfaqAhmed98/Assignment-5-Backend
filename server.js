@@ -13,6 +13,8 @@ const { errorHandler, notFoundHandler } = require("./middleware/error-handler");
 
 const app = express();
 const port = Number(process.env.PORT || 3001);
+let appInitialization;
+let databaseClient;
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PORT must be an integer between 1 and 65535.");
@@ -30,12 +32,50 @@ app.use("/api", (_req, res, next) => {
   res.setHeader("Cache-Control", "no-store");
   next();
 });
-async function startServer() {
+
+async function initializeApp() {
   getJwtSecret();
   const { client, database } = await connectToDatabase();
+  databaseClient = client;
   app.locals.database = database;
   try {
     const auth = await createBetterAuth(database);
+    await Promise.all([
+      database
+        .collection("users")
+        .createIndex({ email: 1 }, { unique: true, name: "users_email_unique" }),
+      database.collection("users").createIndex(
+        { googleId: 1 },
+        { unique: true, sparse: true, name: "users_google_id_unique" },
+      ),
+      database.collection("events").createIndex(
+        { eventDate: 1, _id: 1 },
+        { name: "events_upcoming_by_date" },
+      ),
+      database.collection("events").createIndex(
+        { createdAt: -1, _id: -1 },
+        { name: "events_by_created_at" },
+      ),
+      database.collection("events").createIndex(
+        { createdBy: 1, creationRequestId: 1 },
+        {
+          unique: true,
+          name: "events_creation_request_unique",
+          partialFilterExpression: {
+            creationRequestId: { $type: "string" },
+          },
+        },
+      ),
+      database.collection("eventJoins").createIndex(
+        { userId: 1, eventId: 1 },
+        { unique: true, name: "event_joins_user_event_unique" },
+      ),
+      database.collection("eventJoins").createIndex(
+        { userId: 1, joinedAt: -1, _id: -1 },
+        { name: "event_joins_by_user_and_date" },
+      ),
+    ]);
+
     const { toNodeHandler } = await import("better-auth/node");
     app.locals.betterAuth = auth;
     app.use(
@@ -74,47 +114,25 @@ async function startServer() {
     app.use("/api/events", createEventsRouter());
     app.use(notFoundHandler);
     app.use(errorHandler);
-
-    await Promise.all([
-      database
-        .collection("users")
-        .createIndex({ email: 1 }, { unique: true, name: "users_email_unique" }),
-      database.collection("users").createIndex(
-        { googleId: 1 },
-        { unique: true, sparse: true, name: "users_google_id_unique" },
-      ),
-      database.collection("events").createIndex(
-        { eventDate: 1, _id: 1 },
-        { name: "events_upcoming_by_date" },
-      ),
-      database.collection("events").createIndex(
-        { createdAt: -1, _id: -1 },
-        { name: "events_by_created_at" },
-      ),
-      database.collection("events").createIndex(
-        { createdBy: 1, creationRequestId: 1 },
-        {
-          unique: true,
-          name: "events_creation_request_unique",
-          partialFilterExpression: {
-            creationRequestId: { $type: "string" },
-          },
-        },
-      ),
-      database.collection("eventJoins").createIndex(
-        { userId: 1, eventId: 1 },
-        { unique: true, name: "event_joins_user_event_unique" },
-      ),
-      database.collection("eventJoins").createIndex(
-        { userId: 1, joinedAt: -1, _id: -1 },
-        { name: "event_joins_by_user_and_date" },
-      ),
-    ]);
   } catch (error) {
     await client.close();
+    databaseClient = undefined;
     throw error;
   }
 
+  return app;
+}
+
+function getApp() {
+  appInitialization ??= initializeApp().catch((error) => {
+    appInitialization = undefined;
+    throw error;
+  });
+  return appInitialization;
+}
+
+async function startServer() {
+  await getApp();
   const server = app.listen(port, () => {
     console.log(`Express server listening on port ${port}`);
   });
@@ -124,7 +142,7 @@ async function startServer() {
       console.log(`${signal} received; closing the server.`);
       server.close(async (error) => {
         try {
-          await client.close();
+          await databaseClient?.close();
         } catch (closeError) {
           console.error("Unable to close the MongoDB connection:", closeError);
           process.exitCode = 1;
@@ -139,7 +157,11 @@ async function startServer() {
   }
 }
 
-startServer().catch((error) => {
-  console.error("Unable to start the backend:", error);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  startServer().catch((error) => {
+    console.error("Unable to start the backend:", error);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { getApp, startServer };

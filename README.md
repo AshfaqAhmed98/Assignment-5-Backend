@@ -19,6 +19,13 @@ and do not commit it. Set `MONGODB_URI` to your MongoDB connection string and
 it starts listening and exits with an error if it cannot connect. The
 `/health` endpoint pings MongoDB and returns HTTP 503 if the database is
 unavailable.
+When adding `MONGODB_URI` in Vercel, paste the URI without surrounding quotes.
+
+If the machine's DNS resolver refuses MongoDB Atlas SRV lookups, optionally
+set `MONGODB_DNS_SERVERS` to a comma-separated list of trusted DNS server IPs.
+For example, Cloudflare DNS can be configured as `1.1.1.1,1.0.0.1`. Leave this
+unset when the system resolver works; the setting changes Node.js DNS
+resolution for the backend process.
 
 Unmatched routes and invalid JSON request bodies return consistent JSON error
 responses through centralized Express middleware. Unexpected server errors are
@@ -27,6 +34,20 @@ logged by the backend and returned to clients without exposing internal details.
 The backend currently provides MongoDB connectivity, health checks,
 email/password authentication, and event creation, listing, joining, and
 management endpoints.
+
+## Deploying the backend to Vercel
+
+Create a Vercel project for this backend repository (or set the project's root
+directory to `Backend` in a monorepo). The included `vercel.json` routes
+requests to the Express handler in `api/index.js`; local development continues
+to start the same Express app with `npm run dev`.
+
+Add the backend environment variables from `.env.local` to the Vercel project
+settings for Production (and Preview if needed). Do not commit `.env.local`.
+Set `BETTER_AUTH_URL` to the deployed backend origin and `FRONTEND_ORIGIN` to
+the deployed frontend origin. Keep `JWT_SECRET`, `BETTER_AUTH_SECRET`,
+`MONGODB_URI`, and any OAuth secrets private. After deployment, verify the
+backend at `/health`.
 
 ## BetterAuth backend integration
 
@@ -37,10 +58,14 @@ current frontend continues to work while it is migrated separately.
 Set `BETTER_AUTH_URL` (the backend origin), `BETTER_AUTH_SECRET` (at least 32
 bytes), `FRONTEND_ORIGIN`, and `GOOGLE_CLIENT_ID` plus `GOOGLE_CLIENT_SECRET`
 in `.env.local`. `FRONTEND_ORIGIN` may contain multiple comma-separated
-origins. Google sign-in in BetterAuth is enabled only when both provider
-credentials are set. BetterAuth stores its users, sessions, accounts, and JWT
-keys in its MongoDB collections and provides the JWT and JWKS endpoints under
-`/api/better-auth`.
+origins; for local development, list every frontend origin you use, such as
+`http://localhost:3000,http://localhost:3100`. This variable supplies both
+CORS and BetterAuth trusted origins. In the deployed backend environment, set
+it to the deployed frontend origin (for example, your Vercel URL) instead of
+local development origins. Google sign-in in BetterAuth is enabled only when
+both provider credentials are set. BetterAuth stores its users, sessions,
+accounts, and JWT keys in its MongoDB collections and provides the JWT and
+JWKS endpoints under `/api/better-auth`.
 
 The Better Auth dashboard is enabled by the `dash()` plugin from
 `@better-auth/infra`. Set `BETTER_AUTH_API_KEY` in `.env.local` and keep it
