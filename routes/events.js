@@ -1,5 +1,8 @@
+const Busboy = require("busboy");
 const express = require("express");
-const { ObjectId } = require("mongodb");
+const { GridFSBucket, ObjectId } = require("mongodb");
+const { Transform } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
 const { authenticate } = require("../middleware/authenticate");
 
 const eventTypes = new Set([
@@ -23,6 +26,10 @@ const joinedEventsQueryFields = new Set(["page", "limit"]);
 const managedEventsQueryFields = new Set(["page", "limit"]);
 const maximumPageSize = 100;
 const maximumSkip = 100_000;
+const maximumThumbnailSize = 50 * 1024 * 1024;
+const thumbnailBucketName = "eventImages";
+const idempotencyKeyPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isoDatePattern =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(Z|[+-](\d{2}):(\d{2}))$/;
 
@@ -88,7 +95,7 @@ function toPublicEvent(event) {
   };
 }
 
-function validateCreateEvent(body) {
+function validateCreateEvent(body, { allowMissingThumbnail = false } = {}) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw createHttpError("A JSON object is required.", 400);
   }
@@ -105,7 +112,7 @@ function validateCreateEvent(body) {
     typeof body.description === "string" ? body.description.trim() : "";
   const type = typeof body.type === "string" ? body.type : "";
   const location = typeof body.location === "string" ? body.location.trim() : "";
-  const thumbnailUrl =
+  let thumbnailUrl =
     typeof body.thumbnailUrl === "string" ? body.thumbnailUrl.trim() : "";
   const eventDateValue =
     typeof body.eventDate === "string" ? body.eventDate : "";
@@ -137,19 +144,30 @@ function validateCreateEvent(body) {
     );
   }
 
-  if (thumbnailUrl.length > 2048) {
+  if (!thumbnailUrl && allowMissingThumbnail) {
+    thumbnailUrl = null;
+  } else if (thumbnailUrl.length > 2048) {
     throw createHttpError("Thumbnail URL must be 2048 characters or fewer.", 400);
   }
 
-  let parsedThumbnailUrl;
-  try {
-    parsedThumbnailUrl = new URL(thumbnailUrl);
-  } catch {
-    throw createHttpError("A valid thumbnail URL is required.", 400);
-  }
+  if (thumbnailUrl) {
+    const isStoredImage = /^\/backend\/api\/events\/images\/[0-9a-f]{24}$/i.test(
+      thumbnailUrl,
+    );
+    if (!isStoredImage) {
+      let parsedThumbnailUrl;
+      try {
+        parsedThumbnailUrl = new URL(thumbnailUrl);
+      } catch {
+        throw createHttpError("A valid thumbnail URL is required.", 400);
+      }
 
-  if (!["http:", "https:"].includes(parsedThumbnailUrl.protocol)) {
-    throw createHttpError("Thumbnail URL must use HTTP or HTTPS.", 400);
+      if (!["http:", "https:"].includes(parsedThumbnailUrl.protocol)) {
+        throw createHttpError("Thumbnail URL must use HTTP or HTTPS.", 400);
+      }
+
+      thumbnailUrl = parsedThumbnailUrl.toString();
+    }
   }
 
   const year = dateParts ? Number(dateParts[1]) : 0;
@@ -204,9 +222,196 @@ function validateCreateEvent(body) {
     description,
     type,
     location,
-    thumbnailUrl: parsedThumbnailUrl.toString(),
+    thumbnailUrl,
     eventDate,
   };
+}
+
+function createImageSignatureValidator(contentType) {
+  let header = Buffer.alloc(0);
+
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      if (header.length >= 8) {
+        callback(null, chunk);
+        return;
+      }
+
+      const bytesNeeded = 8 - header.length;
+      const prefix = chunk.subarray(0, bytesNeeded);
+      header = Buffer.concat([header, prefix]);
+      if (header.length < 8) {
+        callback();
+        return;
+      }
+
+      const isJpeg =
+        contentType === "image/jpeg" &&
+        header[0] === 0xff &&
+        header[1] === 0xd8 &&
+        header[2] === 0xff;
+      const isPng =
+        contentType === "image/png" &&
+        header.equals(
+          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        );
+
+      if (!isJpeg && !isPng) {
+        callback(createHttpError("Thumbnail must be a valid JPG or PNG image.", 400));
+        return;
+      }
+
+      callback(null, Buffer.concat([header, chunk.subarray(bytesNeeded)]));
+    },
+    flush(callback) {
+      if (header.length < 8) {
+        callback(createHttpError("Thumbnail image is incomplete.", 400));
+        return;
+      }
+
+      callback();
+    },
+  });
+}
+
+function parseEventMultipart(req, database) {
+  return new Promise((resolve, reject) => {
+    const bucket = new GridFSBucket(database, { bucketName: thumbnailBucketName });
+    const fields = {};
+    let fileId = null;
+    let contentType = null;
+    let uploadStream = null;
+    let uploadFinished = Promise.resolve();
+    let uploadCompleted = false;
+    let uploadAborted = false;
+    let failure = null;
+
+    function fail(error) {
+      failure ??= error;
+    }
+
+    function abortUpload() {
+      if (uploadStream && !uploadCompleted && !uploadAborted) {
+        uploadAborted = true;
+        uploadStream.abort();
+      }
+    }
+
+    let parser;
+    try {
+      parser = Busboy({
+        headers: req.headers,
+        limits: {
+          fileSize: maximumThumbnailSize,
+          files: 1,
+          fields: 10,
+          parts: 11,
+          fieldSize: 4096,
+        },
+      });
+    } catch {
+      reject(createHttpError("A valid multipart event form is required.", 400));
+      return;
+    }
+
+    parser.on("field", (name, value, info) => {
+      if (info.valueTruncated || Object.hasOwn(fields, name)) {
+        fail(createHttpError("Event form contains an invalid or repeated field.", 400));
+        return;
+      }
+
+      fields[name] = value;
+    });
+
+    parser.on("file", (fieldName, file, info) => {
+      if (fieldName !== "thumbnail" || fileId) {
+        fail(createHttpError("Only one thumbnail image can be uploaded.", 400));
+        file.resume();
+        return;
+      }
+
+      if (!["image/jpeg", "image/png"].includes(info.mimeType)) {
+        fail(createHttpError("Thumbnail must be a JPG or PNG image.", 400));
+        file.resume();
+        return;
+      }
+
+      fileId = new ObjectId();
+      contentType = info.mimeType;
+      uploadStream = bucket.openUploadStream("thumbnail", {
+        id: fileId,
+        metadata: { contentType },
+      });
+
+      const signatureValidator = createImageSignatureValidator(contentType);
+      uploadFinished = new Promise((resolveUpload, rejectUpload) => {
+        uploadStream.once("finish", () => {
+          uploadCompleted = true;
+          resolveUpload();
+        });
+        uploadStream.once("error", rejectUpload);
+        signatureValidator.once("error", (error) => {
+          fail(error);
+          rejectUpload(error);
+          file.unpipe(signatureValidator);
+          file.resume();
+          abortUpload();
+        });
+        file.once("error", rejectUpload);
+        file.once("limit", () => {
+          fail(createHttpError("Thumbnail images must be 50 MB or smaller.", 413));
+        });
+      });
+      void uploadFinished.catch(() => {});
+      file.pipe(signatureValidator).pipe(uploadStream);
+    });
+
+    parser.on("fieldsLimit", () => {
+      fail(createHttpError("Event form contains too many fields.", 400));
+    });
+    parser.on("filesLimit", () => {
+      fail(createHttpError("Only one thumbnail image can be uploaded.", 400));
+    });
+    parser.on("partsLimit", () => {
+      fail(createHttpError("Event form contains too many parts.", 400));
+    });
+    parser.on("error", fail);
+    parser.on("close", async () => {
+      try {
+        await uploadFinished;
+      } catch (error) {
+        fail(error);
+      }
+
+      if (failure) {
+        if (fileId && uploadCompleted) {
+          try {
+            await bucket.delete(fileId);
+          } catch (cleanupError) {
+            console.error("Unable to clean up an invalid thumbnail upload:", cleanupError);
+          }
+        } else if (uploadStream && !uploadCompleted) {
+          abortUpload();
+        }
+        reject(failure);
+        return;
+      }
+
+      resolve({ fields, fileId, contentType });
+    });
+
+    req.pipe(parser);
+  });
+}
+
+async function deleteUploadedThumbnail(database, fileId) {
+  try {
+    await new GridFSBucket(database, { bucketName: thumbnailBucketName }).delete(
+      fileId,
+    );
+  } catch (error) {
+    console.error("Unable to clean up a thumbnail after event creation failed:", error);
+  }
 }
 
 function createEventsRouter() {
@@ -366,20 +571,124 @@ function createEventsRouter() {
     res.json({ event: toPublicEvent(event) });
   });
 
-  router.post("/", authenticate, async (req, res) => {
-    const event = validateCreateEvent(req.body);
-    const document = {
-      ...event,
-      createdBy: getAuthenticatedUserId(req),
-      createdAt: new Date(),
-    };
-    const result = await req.app.locals.database
-      .collection("events")
-      .insertOne(document);
+  router.get("/:id/join", authenticate, async (req, res) => {
+    if (!ObjectId.isValid(req.params.id)) {
+      throw createHttpError("Event was not found.", 404);
+    }
 
-    res.status(201).json({
-      event: toPublicEvent({ ...document, _id: result.insertedId }),
+    const database = req.app.locals.database;
+    const eventId = new ObjectId(req.params.id);
+    const userId = getAuthenticatedUserId(req);
+    const event = await database
+      .collection("events")
+      .findOne({ _id: eventId }, { projection: { _id: 1, createdBy: 1 } });
+
+    if (!event) {
+      throw createHttpError("Event was not found.", 404);
+    }
+
+    const isOwner =
+      event.createdBy instanceof ObjectId && event.createdBy.equals(userId);
+    if (isOwner) {
+      await database.collection("eventJoins").deleteOne({ eventId, userId });
+      res.json({ joined: false, isOwner: true });
+      return;
+    }
+
+    const join = await database.collection("eventJoins").findOne(
+      { eventId, userId },
+      { projection: { _id: 1 } },
+    );
+    res.json({ joined: Boolean(join), isOwner: false });
+  });
+
+  router.post("/", authenticate, async (req, res) => {
+    const idempotencyKey = req.get("Idempotency-Key");
+    if (idempotencyKey !== undefined && !idempotencyKeyPattern.test(idempotencyKey)) {
+      throw createHttpError("Idempotency-Key must be a UUID.", 400);
+    }
+
+    const database = req.app.locals.database;
+    const createdBy = getAuthenticatedUserId(req);
+    const creator = await database
+      .collection("users")
+      .findOne({ _id: createdBy }, { projection: { email: 1 } });
+    if (!creator || typeof creator.email !== "string") {
+      throw createHttpError("Your account could not be found.", 401);
+    }
+    const upload = req.is("multipart/form-data")
+      ? await parseEventMultipart(req, database)
+      : { fields: req.body, fileId: null };
+
+    try {
+      const event = validateCreateEvent(upload.fields, {
+        allowMissingThumbnail: Boolean(upload.fileId),
+      });
+      if (upload.fileId) {
+        event.thumbnailUrl = `/backend/api/events/images/${upload.fileId.toString()}`;
+      }
+
+      const document = {
+        ...event,
+        createdBy,
+        createdByEmail: creator.email,
+        createdAt: new Date(),
+        ...(idempotencyKey ? { creationRequestId: idempotencyKey } : {}),
+      };
+      const events = database.collection("events");
+      let result;
+      try {
+        result = await events.insertOne(document);
+      } catch (error) {
+        if (idempotencyKey && error.code === 11000) {
+          const previousEvent = await events.findOne({
+            createdBy,
+            creationRequestId: idempotencyKey,
+          });
+          if (previousEvent) {
+            if (upload.fileId) {
+              await deleteUploadedThumbnail(database, upload.fileId);
+            }
+            res.status(201).json({ event: toPublicEvent(previousEvent) });
+            return;
+          }
+        }
+        throw error;
+      }
+
+      res.status(201).json({
+        event: toPublicEvent({ ...document, _id: result.insertedId }),
+      });
+    } catch (error) {
+      if (upload.fileId) {
+        await deleteUploadedThumbnail(database, upload.fileId);
+      }
+      throw error;
+    }
+  });
+
+  router.get("/images/:id", async (req, res) => {
+    if (!ObjectId.isValid(req.params.id)) {
+      throw createHttpError("Thumbnail image was not found.", 404);
+    }
+
+    const bucket = new GridFSBucket(req.app.locals.database, {
+      bucketName: thumbnailBucketName,
     });
+    const file = await bucket
+      .find({ _id: new ObjectId(req.params.id) })
+      .next();
+    if (!file || !["image/jpeg", "image/png"].includes(file.metadata?.contentType)) {
+      throw createHttpError("Thumbnail image was not found.", 404);
+    }
+
+    res.set({
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Length": String(file.length),
+      "Content-Type": file.metadata.contentType,
+      "X-Content-Type-Options": "nosniff",
+    });
+    await pipeline(bucket.openDownloadStream(file._id), res);
   });
 
   router.post("/:id/join", authenticate, async (req, res) => {
@@ -401,6 +710,16 @@ function createEventsRouter() {
     }
 
     const userId = getAuthenticatedUserId(req);
+    if (
+      event.createdBy instanceof ObjectId &&
+      event.createdBy.equals(userId)
+    ) {
+      throw createHttpError(
+        "You created this event. Hosts are not listed as attendees.",
+        403,
+      );
+    }
+
     const user = await database.collection("users").findOne(
       { _id: userId },
       { projection: { _id: 1 } },
@@ -412,9 +731,10 @@ function createEventsRouter() {
 
     const joinedAt = new Date();
     const publicEvent = toPublicEvent(event);
+    const joins = database.collection("eventJoins");
 
     try {
-      await database.collection("eventJoins").insertOne({
+      await joins.insertOne({
         eventId: event._id,
         userId,
         joinedAt,
@@ -422,13 +742,36 @@ function createEventsRouter() {
       });
     } catch (error) {
       if (error.code === 11000) {
-        throw createHttpError("You have already joined this event.", 409);
+        const existingJoin = await joins.findOne(
+          { eventId: event._id, userId },
+          { projection: { joinedAt: 1 } },
+        );
+        if (existingJoin) {
+          res.json({
+            event: publicEvent,
+            joinedAt: existingJoin.joinedAt.toISOString(),
+          });
+          return;
+        }
       }
 
       throw error;
     }
 
     res.status(201).json({ event: publicEvent, joinedAt: joinedAt.toISOString() });
+  });
+
+  router.delete("/:id/join", authenticate, async (req, res) => {
+    if (!ObjectId.isValid(req.params.id)) {
+      throw createHttpError("Event was not found.", 404);
+    }
+
+    await req.app.locals.database.collection("eventJoins").deleteOne({
+      eventId: new ObjectId(req.params.id),
+      userId: getAuthenticatedUserId(req),
+    });
+
+    res.status(204).end();
   });
 
   router.put("/:id", authenticate, async (req, res) => {

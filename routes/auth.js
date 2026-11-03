@@ -6,7 +6,7 @@ const { createAccessToken, tokenLifetime } = require("../lib/jwt");
 const { OAuth2Client } = require("google-auth-library");
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const minimumPasswordLength = 8;
+const minimumPasswordLength = 6;
 const passwordSaltRounds = 12;
 const maximumGoogleCredentialLength = 8192;
 
@@ -31,6 +31,40 @@ function validateRequestBody(body, allowedFields) {
   return body;
 }
 
+function validatePhotoURL(value) {
+  if (typeof value !== "string" || !value.trim() || value.length > 2048) {
+    throw createHttpError("A valid profile photo URL is required.", 400);
+  }
+
+  let photoURL;
+  try {
+    photoURL = new URL(value.trim());
+  } catch {
+    throw createHttpError("A valid profile photo URL is required.", 400);
+  }
+
+  if (!["http:", "https:"].includes(photoURL.protocol)) {
+    throw createHttpError("Profile photo URLs must use HTTP or HTTPS.", 400);
+  }
+
+  return photoURL.toString();
+}
+
+function getGooglePhotoURL(value) {
+  if (typeof value !== "string" || !value.trim() || value.length > 2048) {
+    return undefined;
+  }
+
+  try {
+    const photoURL = new URL(value.trim());
+    return ["http:", "https:"].includes(photoURL.protocol)
+      ? photoURL.toString()
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function createAuthResponse(user) {
   return {
     token: createAccessToken(user._id.toString()),
@@ -40,6 +74,7 @@ function createAuthResponse(user) {
       id: user._id.toString(),
       name: user.name,
       email: user.email,
+      ...(typeof user.photoURL === "string" ? { photoURL: user.photoURL } : {}),
     },
   };
 }
@@ -61,13 +96,20 @@ function createAuthRouter() {
   const router = express.Router();
 
   router.post("/register", async (req, res) => {
-    const body = validateRequestBody(req.body, ["name", "email", "password"]);
+    const body = validateRequestBody(req.body, [
+      "name",
+      "email",
+      "password",
+      "photoURL",
+    ]);
     const users = req.app.locals.database.collection("users");
     const name = typeof body.name === "string" ? body.name.trim() : "";
     const email =
       typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
     const password =
       typeof body.password === "string" ? body.password : "";
+    const photoURL =
+      body.photoURL === undefined ? undefined : validatePhotoURL(body.photoURL);
 
     if (!name || name.length > 80) {
       throw createHttpError("Name is required and must be 80 characters or fewer.", 400);
@@ -77,9 +119,14 @@ function createAuthRouter() {
       throw createHttpError("A valid email address is required.", 400);
     }
 
-    if (password.length < minimumPasswordLength || password.length > 128) {
+    if (
+      password.length < minimumPasswordLength ||
+      password.length > 128 ||
+      !/[A-Z]/.test(password) ||
+      !/[a-z]/.test(password)
+    ) {
       throw createHttpError(
-        `Password must be between ${minimumPasswordLength} and 128 characters.`,
+        `Password must be between ${minimumPasswordLength} and 128 characters and include an uppercase and a lowercase letter.`,
         400,
       );
     }
@@ -88,6 +135,7 @@ function createAuthRouter() {
     const user = {
       name,
       email,
+      ...(photoURL ? { photoURL } : {}),
       passwordHash,
       createdAt: new Date(),
     };
@@ -165,6 +213,7 @@ function createAuthRouter() {
     const users = req.app.locals.database.collection("users");
     const googleId = payload.sub;
     const email = payload.email.trim().toLowerCase();
+    const googlePhotoURL = getGooglePhotoURL(payload.picture);
     let user = await users.findOne({ googleId });
 
     if (!user) {
@@ -185,6 +234,7 @@ function createAuthRouter() {
         name,
         email,
         googleId,
+        ...(googlePhotoURL ? { photoURL: googlePhotoURL } : {}),
         createdAt: new Date(),
       };
 
@@ -206,6 +256,14 @@ function createAuthRouter() {
       }
     }
 
+    if (googlePhotoURL && user.photoURL !== googlePhotoURL) {
+      await users.updateOne(
+        { _id: user._id },
+        { $set: { photoURL: googlePhotoURL } },
+      );
+      user.photoURL = googlePhotoURL;
+    }
+
     res.json(createAuthResponse(user));
   });
 
@@ -217,7 +275,7 @@ function createAuthRouter() {
 
     const user = await users.findOne(
       { _id: new ObjectId(req.auth.userId) },
-      { projection: { name: 1, email: 1 } },
+      { projection: { name: 1, email: 1, photoURL: 1 } },
     );
 
     if (!user) {
@@ -229,6 +287,9 @@ function createAuthRouter() {
         id: user._id.toString(),
         name: user.name,
         email: user.email,
+        ...(typeof user.photoURL === "string"
+          ? { photoURL: user.photoURL }
+          : {}),
       },
     });
   });

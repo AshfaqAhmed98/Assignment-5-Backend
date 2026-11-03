@@ -28,6 +28,25 @@ The backend currently provides MongoDB connectivity, health checks,
 email/password authentication, and event creation, listing, joining, and
 management endpoints.
 
+## BetterAuth backend integration
+
+BetterAuth is available as a parallel authentication API at
+`/api/better-auth/*`. The existing `/api/auth/*` routes remain active so the
+current frontend continues to work while it is migrated separately.
+
+Set `BETTER_AUTH_URL` (the backend origin), `BETTER_AUTH_SECRET` (at least 32
+bytes), `FRONTEND_ORIGIN`, and `GOOGLE_CLIENT_ID` plus `GOOGLE_CLIENT_SECRET`
+in `.env.local`. `FRONTEND_ORIGIN` may contain multiple comma-separated
+origins. Google sign-in in BetterAuth is enabled only when both provider
+credentials are set. BetterAuth stores its users, sessions, accounts, and JWT
+keys in its MongoDB collections and provides the JWT and JWKS endpoints under
+`/api/better-auth`.
+
+The current event API still authorizes requests using the legacy HS256 tokens
+from `/api/auth/*`. BetterAuth users have not yet been linked to the existing
+ObjectId-based event ownership records, so switching the frontend to
+BetterAuth is a separate migration step.
+
 ## JWT authentication
 
 Set `JWT_SECRET` in `.env.local` to a private random secret of at least 32
@@ -40,8 +59,8 @@ tokens and logout/revocation are not implemented.
 ### Authentication endpoints
 
 - `POST /api/auth/register` — JSON body: `{ "name", "email", "password" }`.
-  Passwords must be 8–128 characters. The password is hashed before it is
-  stored in MongoDB.
+  Passwords must be 6–128 characters and include at least one uppercase and
+  one lowercase letter. The password is hashed before it is stored in MongoDB.
 - `POST /api/auth/login` — JSON body: `{ "email", "password" }`.
 - `POST /api/auth/google` — JSON body: `{ "credential" }` containing the
   Google Identity Services ID token. The backend verifies the token audience,
@@ -58,21 +77,34 @@ Google accounts are uniquely indexed by Google subject ID.
 
 ## Event endpoints
 
-- `POST /api/events` — requires a bearer token. JSON body: `{ "title",
-  "description", "type", "thumbnailUrl", "location", "eventDate" }`.
-  `eventDate` must be a future ISO 8601 timestamp with a timezone. The event is
-  saved with its creator's user ID.
+- `POST /api/events` — requires a bearer token. Accepts a JSON body containing
+  `{ "title", "description", "type", "thumbnailUrl", "location", "eventDate" }`
+  with an HTTP/HTTPS thumbnail URL, or `multipart/form-data` with the same event
+  fields and a JPG/PNG file in the `thumbnail` field. Uploaded thumbnails are
+  limited to 50 MB and stored in MongoDB GridFS. They are served from
+  `/api/events/images/:id`. `eventDate` must be a future ISO 8601 timestamp
+  with a timezone. The event is saved with its creator's user ID and email;
+  creator email is retained for assignment validation and is not included in
+  public event responses. Clients may
+  include an `Idempotency-Key` UUID header so retries of a completed creation
+  return the original event instead of creating a duplicate.
 - `GET /api/events` — public list of upcoming events sorted by event date
   ascending by default. Supports `page` (default `1`), `limit` (default `20`,
   maximum `100`), `sort` (`eventDate` or `createdAt`), and `order` (`asc` or
   `desc`). The response includes pagination totals.
 - `GET /api/events/:id` — public event details by MongoDB ObjectId.
+- `GET /api/events/:id/join` — requires a bearer token. Reports whether the
+  current user has joined the event and whether they created it. Creators are
+  not counted as attendees.
 - `GET /api/events/mine` — requires a bearer token. Lists events created by
   the current user, newest first. Supports `page` (default `1`) and `limit`
   (default `20`, maximum `100`); the response includes pagination totals.
 - `POST /api/events/:id/join` — requires a bearer token. Registers the current
-  user for an upcoming event and returns the event snapshot. Joining the same
-  event more than once returns `409`.
+  user for an upcoming event and returns the event snapshot. Creators cannot
+  join their own events. Repeating an attendee's request returns the existing
+  registration instead of creating a duplicate.
+- `DELETE /api/events/:id/join` — requires a bearer token. Removes the current
+  user's joined-event entry; repeating the request is safe.
 - `GET /api/events/joined` — requires a bearer token. Returns the current
   user's joined event snapshots, newest registrations first. Supports `page`
   (default `1`) and `limit` (default `20`, maximum `100`); the response includes
@@ -86,10 +118,9 @@ Google accounts are uniquely indexed by Google subject ID.
   ownership. Returns `204` on success; nonexistent events and events owned by
   another user both return `404`.
 
-Creation currently accepts an HTTP or HTTPS thumbnail URL; file uploads are
-not implemented. Updates use the same validation, including a future
-ISO 8601 event date and HTTP/HTTPS thumbnail URL. MongoDB indexes support
-upcoming-event and creation-date sorting.
+Updates use the same validation, including a future ISO 8601 event date and
+either an HTTP/HTTPS thumbnail URL or an existing GridFS thumbnail URL.
+MongoDB indexes support upcoming-event and creation-date sorting.
 
 ## API request security
 
