@@ -96,6 +96,40 @@ function validateGoogleCredential(body) {
   return validatedBody.credential;
 }
 
+async function linkVerifiedLegacyPassword(betterAuth, email, password) {
+  if (!betterAuth) {
+    return;
+  }
+
+  const context = await betterAuth.$context;
+  const existing = await context.internalAdapter.findUserByEmail(email, {
+    includeAccounts: true,
+  });
+  if (
+    !existing ||
+    existing.accounts.some((account) => account.providerId === "credential")
+  ) {
+    return;
+  }
+
+  const passwordHash = await context.password.hash(password);
+  try {
+    await context.internalAdapter.linkAccount({
+      userId: existing.user.id,
+      providerId: "credential",
+      accountId: existing.user.id,
+      password: passwordHash,
+    });
+  } catch (error) {
+    const credentialAccount = await context.internalAdapter.findCredentialAccount(
+      existing.user.id,
+    );
+    if (!credentialAccount) {
+      throw error;
+    }
+  }
+}
+
 function createAuthRouter() {
   const router = express.Router();
 
@@ -253,6 +287,12 @@ function createAuthRouter() {
     if (!passwordMatches) {
       throw createHttpError("Email or password is incorrect.", 401);
     }
+
+    await linkVerifiedLegacyPassword(
+      req.app.locals.betterAuth,
+      email,
+      password,
+    );
 
     res.json(createAuthResponse(user));
   });
@@ -437,4 +477,4 @@ function createAuthRouter() {
   return router;
 }
 
-module.exports = { createAuthRouter };
+module.exports = { createAuthRouter, linkVerifiedLegacyPassword };
