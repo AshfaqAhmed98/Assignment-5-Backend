@@ -410,7 +410,7 @@ async function deleteUploadedThumbnail(database, fileId) {
       fileId,
     );
   } catch (error) {
-    console.error("Unable to clean up a thumbnail after event creation failed:", error);
+    console.error("Unable to clean up an unused thumbnail upload:", error);
   }
 }
 
@@ -495,7 +495,7 @@ function createEventsRouter() {
     const [documents, total] = await Promise.all([
       joins
         .find(filter)
-        .sort({ joinedAt: -1, _id: -1 })
+        .sort({ "event.eventDate": 1, _id: 1 })
         .skip(skip)
         .limit(limit)
         .toArray(),
@@ -781,23 +781,49 @@ function createEventsRouter() {
 
     const eventId = new ObjectId(req.params.id);
     const createdBy = getAuthenticatedUserId(req);
-    const event = validateCreateEvent(req.body);
-    const events = req.app.locals.database.collection("events");
-    const result = await events.updateOne(
+    const database = req.app.locals.database;
+    const events = database.collection("events");
+    const currentEvent = await events.findOne(
       { _id: eventId, createdBy },
-      { $set: event },
+      { projection: { _id: 1 } },
     );
-
-    if (result.matchedCount === 0) {
+    if (!currentEvent) {
       throw createHttpError("Event was not found.", 404);
     }
 
-    const updatedEvent = await events.findOne({ _id: eventId, createdBy });
-    if (!updatedEvent) {
-      throw createHttpError("Event was not found.", 404);
-    }
+    const upload = req.is("multipart/form-data")
+      ? await parseEventMultipart(req, database)
+      : { fields: req.body, fileId: null };
+    let updateApplied = false;
+    try {
+      const event = validateCreateEvent(upload.fields, {
+        allowMissingThumbnail: Boolean(upload.fileId),
+      });
+      if (upload.fileId) {
+        event.thumbnailUrl = `/backend/api/events/images/${upload.fileId.toString()}`;
+      }
 
-    res.json({ event: toPublicEvent(updatedEvent) });
+      const result = await events.updateOne(
+        { _id: eventId, createdBy },
+        { $set: event },
+      );
+      if (result.matchedCount === 0) {
+        throw createHttpError("Event was not found.", 404);
+      }
+      updateApplied = true;
+
+      const updatedEvent = await events.findOne({ _id: eventId, createdBy });
+      if (!updatedEvent) {
+        throw createHttpError("Event was not found.", 404);
+      }
+
+      res.json({ event: toPublicEvent(updatedEvent) });
+    } catch (error) {
+      if (upload.fileId && !updateApplied) {
+        await deleteUploadedThumbnail(database, upload.fileId);
+      }
+      throw error;
+    }
   });
 
   router.delete("/:id", authenticate, async (req, res) => {

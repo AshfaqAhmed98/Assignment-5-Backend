@@ -8,6 +8,7 @@
     "dev": "node --env-file=.env.local --watch server.js"
   },
   "dependencies": {
+    "@better-auth/infra": "^0.4.26",
     "bcryptjs": "^3.0.3",
     "better-auth": "^1.7.15",
     "busboy": "^1.6.0",

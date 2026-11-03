@@ -32,7 +32,7 @@ function errorHandler(error, _req, res, next) {
     isInvalidJson
       ? "Request body must contain valid JSON."
       : isPayloadTooLarge
-        ? "Request body must be 32 KB or smaller."
+        ? "Request body exceeds the allowed size."
         : statusCode >= 500
           ? statusCode === 503
             ? "Service unavailable."

@@ -44,8 +44,16 @@ async function startServer() {
         credentials: true,
       }),
     );
-    app.all("/api/better-auth/*splat", toNodeHandler(auth));
-    app.all("/api/better-auth", toNodeHandler(auth));
+    const betterAuthHandler = toNodeHandler(auth);
+    app.all("/api/better-auth/*splat", betterAuthHandler);
+    app.all("/api/better-auth", betterAuthHandler);
+    app.all("/api/auth/dash/*splat", (req, res, next) => {
+      req.url = req.url.replace(
+        /^\/api\/auth\/dash(?=\/|$)/,
+        "/api/better-auth/dash",
+      );
+      return betterAuthHandler(req, res, next);
+    });
     app.use(express.json({ limit: "32kb" }));
 
     app.get("/", (_req, res) => {

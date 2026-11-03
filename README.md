@@ -42,10 +42,37 @@ credentials are set. BetterAuth stores its users, sessions, accounts, and JWT
 keys in its MongoDB collections and provides the JWT and JWKS endpoints under
 `/api/better-auth`.
 
+The Better Auth dashboard is enabled by the `dash()` plugin from
+`@better-auth/infra`. Set `BETTER_AUTH_API_KEY` in `.env.local` and keep it
+private; it must never be added to frontend environment variables. In the
+dashboard connection settings, use the public backend server URL and the base
+path `/api/better-auth` (not `/api/auth`, which is the separate legacy API).
+For projects whose dashboard settings still use `/api/auth`, the backend
+temporarily forwards `/api/auth/dash/*` requests to the Better Auth dashboard
+plugin so the dashboard can verify ownership and save the corrected base path.
+For local development, expose port `3001` with a temporary Cloudflare tunnel:
+
+```bash
+cloudflared tunnel --url http://localhost:3001
+```
+
+Paste the generated HTTPS URL into the dashboard's Server URL field and leave
+the tunnel running while using the dashboard. The tunnel URL changes when a
+new temporary tunnel is started, so update the dashboard connection URL if it
+changes. For a permanent connection, use the deployed backend's stable HTTPS
+URL instead.
+
+The frontend exchanges an authenticated BetterAuth session at
+`POST /api/auth/exchange` for the short-lived legacy API JWT. This compatibility
+step maps the BetterAuth email to the existing ObjectId-based user record (or
+creates one) so event ownership and protected event endpoints keep working.
+Existing email/password accounts are migrated to BetterAuth on their first
+successful frontend login.
+
 The current event API still authorizes requests using the legacy HS256 tokens
-from `/api/auth/*`. BetterAuth users have not yet been linked to the existing
-ObjectId-based event ownership records, so switching the frontend to
-BetterAuth is a separate migration step.
+from `/api/auth/*`; the exchange endpoint supplies those tokens after
+validating the BetterAuth session. This keeps the existing event authorization
+and ownership model intact during the frontend migration.
 
 ## JWT authentication
 
@@ -68,6 +95,12 @@ tokens and logout/revocation are not implemented.
   an account on first sign-in. Existing email/password accounts must continue
   to use email/password sign-in; implicit account linking is not performed.
 - `GET /api/auth/me` — requires a valid bearer token.
+- `POST /api/auth/exchange` — requires a BetterAuth session cookie and returns
+  the legacy API JWT used by protected event endpoints.
+- `POST /api/auth/profile-images` — accepts a raw JPG or PNG request body
+  (`Content-Type: image/jpeg` or `image/png`), up to 2 MB, and stores the image
+  in MongoDB GridFS. The returned image ID is served from
+  `GET /api/auth/profile-images/:id`.
 
 Emails are normalized to lowercase and uniquely indexed. Tokens use HS256 and
 are checked for signature, issuer, audience, and expiration.
@@ -106,7 +139,7 @@ Google accounts are uniquely indexed by Google subject ID.
 - `DELETE /api/events/:id/join` — requires a bearer token. Removes the current
   user's joined-event entry; repeating the request is safe.
 - `GET /api/events/joined` — requires a bearer token. Returns the current
-  user's joined event snapshots, newest registrations first. Supports `page`
+  user's joined event snapshots, sorted by event date ascending. Supports `page`
   (default `1`) and `limit` (default `20`, maximum `100`); the response includes
   pagination totals. Joined events remain visible as snapshots if the original
   event is later updated or deleted.
@@ -124,7 +157,8 @@ MongoDB indexes support upcoming-event and creation-date sorting.
 
 ## API request security
 
-JSON request bodies are limited to 32 KB. Event create/update and auth
+JSON request bodies are limited to 32 KB; profile-photo uploads are separately
+limited to 2 MB and validated as JPG or PNG. Event create/update and auth
 endpoints validate the request object, accept only documented fields, and
 reject invalid types, lengths, dates, URLs, and pagination values. Event query
 filters and sort fields are constructed server-side rather than taken directly

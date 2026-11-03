@@ -1,6 +1,8 @@
 const bcrypt = require("bcryptjs");
 const express = require("express");
-const { ObjectId } = require("mongodb");
+const { GridFSBucket, ObjectId } = require("mongodb");
+const { Readable } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
 const { authenticate } = require("../middleware/authenticate");
 const { createAccessToken, tokenLifetime } = require("../lib/jwt");
 const { OAuth2Client } = require("google-auth-library");
@@ -9,6 +11,8 @@ const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const minimumPasswordLength = 6;
 const passwordSaltRounds = 12;
 const maximumGoogleCredentialLength = 8192;
+const maximumProfilePhotoSize = 2 * 1024 * 1024;
+const profilePhotoBucketName = "profilePhotos";
 
 function createHttpError(message, statusCode) {
   const error = new Error(message);
@@ -94,6 +98,76 @@ function validateGoogleCredential(body) {
 
 function createAuthRouter() {
   const router = express.Router();
+
+  router.post(
+    "/profile-images",
+    express.raw({
+      type: ["image/jpeg", "image/png"],
+      limit: maximumProfilePhotoSize,
+    }),
+    async (req, res) => {
+      const contentType = req.get("Content-Type");
+      const image = req.body;
+      if (!Buffer.isBuffer(image) || image.length === 0) {
+        throw createHttpError("A JPG or PNG profile photo is required.", 400);
+      }
+
+      const isJpeg =
+        contentType === "image/jpeg" &&
+        image.length >= 3 &&
+        image[0] === 0xff &&
+        image[1] === 0xd8 &&
+        image[2] === 0xff;
+      const isPng =
+        contentType === "image/png" &&
+        image.length >= 8 &&
+        image.subarray(0, 8).equals(
+          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        );
+      if (!isJpeg && !isPng) {
+        throw createHttpError("Profile photo must be a valid JPG or PNG image.", 400);
+      }
+
+      const bucket = new GridFSBucket(req.app.locals.database, {
+        bucketName: profilePhotoBucketName,
+      });
+      const fileId = new ObjectId();
+      const upload = bucket.openUploadStream(`profile-${fileId.toHexString()}`, {
+        id: fileId,
+        metadata: { contentType },
+      });
+      await pipeline(Readable.from([image]), upload);
+
+      res.status(201).json({ id: fileId.toHexString() });
+    },
+  );
+
+  router.get("/profile-images/:id", async (req, res) => {
+    if (!ObjectId.isValid(req.params.id)) {
+      throw createHttpError("Profile photo was not found.", 404);
+    }
+
+    const bucket = new GridFSBucket(req.app.locals.database, {
+      bucketName: profilePhotoBucketName,
+    });
+    const file = await bucket
+      .find({ _id: new ObjectId(req.params.id) })
+      .next();
+    if (
+      !file ||
+      !["image/jpeg", "image/png"].includes(file.metadata?.contentType)
+    ) {
+      throw createHttpError("Profile photo was not found.", 404);
+    }
+
+    res.set({
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Length": String(file.length),
+      "Content-Type": file.metadata.contentType,
+      "X-Content-Type-Options": "nosniff",
+    });
+    await pipeline(bucket.openDownloadStream(file._id), res);
+  });
 
   router.post("/register", async (req, res) => {
     const body = validateRequestBody(req.body, [
@@ -262,6 +336,72 @@ function createAuthRouter() {
         { $set: { photoURL: googlePhotoURL } },
       );
       user.photoURL = googlePhotoURL;
+    }
+
+    res.json(createAuthResponse(user));
+  });
+
+  router.post("/exchange", async (req, res) => {
+    const betterAuth = req.app.locals.betterAuth;
+    if (!betterAuth) {
+      throw createHttpError("Authentication service is unavailable.", 503);
+    }
+
+    const { fromNodeHeaders } = await import("better-auth/node");
+    const session = await betterAuth.api.getSession({
+      headers: fromNodeHeaders(req.headers),
+    });
+
+    if (!session || typeof session.user.email !== "string") {
+      throw createHttpError("A valid BetterAuth session is required.", 401);
+    }
+
+    const email = session.user.email.trim().toLowerCase();
+    if (!emailPattern.test(email) || email.length > 254) {
+      throw createHttpError("The BetterAuth account has an invalid email.", 401);
+    }
+
+    const users = req.app.locals.database.collection("users");
+    let user = await users.findOne({ email });
+    const sessionPhotoURL = getGooglePhotoURL(session.user.image);
+
+    if (!user) {
+      const name =
+        typeof session.user.name === "string" && session.user.name.trim()
+          ? session.user.name.trim().slice(0, 80)
+          : email.split("@")[0].slice(0, 80);
+      const legacyUser = {
+        name,
+        email,
+        ...(sessionPhotoURL ? { photoURL: sessionPhotoURL } : {}),
+        createdAt: new Date(),
+      };
+
+      try {
+        const result = await users.insertOne(legacyUser);
+        user = { ...legacyUser, _id: result.insertedId };
+      } catch (error) {
+        if (error.code !== 11000) {
+          throw error;
+        }
+
+        user = await users.findOne({ email });
+        if (!user) {
+          throw error;
+        }
+      }
+    }
+
+    if (sessionPhotoURL && user.photoURL !== sessionPhotoURL) {
+      const updateResult = await users.updateOne(
+        { _id: user._id },
+        { $set: { photoURL: sessionPhotoURL } },
+      );
+      if (updateResult.modifiedCount > 0) {
+        user.photoURL = sessionPhotoURL;
+      } else {
+        user = (await users.findOne({ _id: user._id })) ?? user;
+      }
     }
 
     res.json(createAuthResponse(user));
