@@ -401,9 +401,15 @@ function createAuthRouter() {
       throw createHttpError("The BetterAuth account has an invalid email.", 401);
     }
 
+    const betterAuthContext = await betterAuth.$context;
+    const betterAuthUser = await betterAuthContext.internalAdapter.findUserByEmail(
+      email,
+    );
     const users = req.app.locals.database.collection("users");
     let user = await users.findOne({ email });
-    const sessionPhotoURL = getGooglePhotoURL(session.user.image);
+    const sessionPhotoURL =
+      getGooglePhotoURL(session.user.image) ??
+      getGooglePhotoURL(betterAuthUser?.user?.image);
 
     if (!user) {
       const name =
